@@ -1,7 +1,0 @@
-[build]
-target = "thumbv7em-none-eabihf"
-
-[target.thumbv7em-none-eabihf]
-# Downloads only — does not hold the probe open after flashing.
-# Run both bootloader and firmware with the flash script.
-runner = "probe-rs download --chip STM32F401RETx"
