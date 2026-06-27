@@ -8,7 +8,7 @@ Written in Rust using the Embassy async executor — no heap, no OS, no RTOS abs
 ## What it does
 
 | Subsystem | Hardware | Detail |
-|---|---|---|
+|-----------|----------|--------|
 | Analogue capture | PA0, PA1 → ADC1 | DMA ring buffer (4096 samples), interleaved 2-channel, converted to mV |
 | PWM generation | PA8–PA11 → TIM1 | 4 channels at 10 kHz: 25 / 50 / 75 / 10 % duty cycles |
 | PWM input capture | PA6 → TIM3 | Measures period ticks, pulse width, duty cycle % |
@@ -20,13 +20,14 @@ Analogue and digital modes are selected at compile time via feature flags — no
 
 ## Technical highlights
 
-- **DMA ring buffer** — ADC samples land in a static `[u16; 4096]` without CPU intervention; Embassy's `into_ring_buffered` drives continuous dual-channel acquisition
-- **Two independent timers** — TIM1 as SimplePwm (output), TIM3 as PwmInput (input capture), wired via `bind_interrupts!`
-- **Boot integrity** — before spawning any task, the firmware verifies the clock tree, writes/reads a stack canary, and pattern-tests 16 words of SRAM using `write_volatile`/`read_volatile`
+- **DMA ring buffer** — ADC samples land in a static [u16; 4096] without CPU intervention; Embassy's into_ring_buffered drives continuous dual-channel acquisition
+- **Two independent timers** — TIM1 as SimplePwm (output), TIM3 as PwmInput (input capture), wired via bind_interrupts!
+- **Boot integrity** — before spawning any task, the firmware verifies the clock tree, writes/reads a stack canary, and pattern-tests 16 words of SRAM using write_volatile/read_volatile
 - **MPU** — 4 hardware memory protection regions configured before init: flash read-only, SRAM no-execute, peripheral space device memory, stack overflow guard at 0x2000_4000
-- **Custom bootloader** — separate binary at 0x0800_0000; validates application SP and reset vector before writing VTOR and branching via `msr msp` / `bx`
-- **Async on Cortex-M4** — Embassy's cooperative scheduler; tasks yield at `.await` points, no preemption needed
-- **Zero heap** — no `alloc`, no dynamic dispatch; all buffers are static
+- **Custom bootloader** — separate binary at 0x0800_0000; validates application SP and reset vector before writing VTOR and branching via msr msp / bx
+- **Async on Cortex-M4** — Embassy's cooperative scheduler; tasks yield at .await points, no preemption needed
+- **Zero heap** — no alloc, no dynamic dispatch; all buffers are static
+- **Feature-based mode selection** — compile-time analog/digital mode switching with no runtime branching
 
 ---
 
@@ -48,7 +49,7 @@ cd bootloader && cargo build --release
 probe-rs download --chip STM32F401RETx \
     ../target/thumbv7em-none-eabihf/release/bootloader
 
-# 2. Flash firmware (analogue mode)
+# 2. Flash firmware (analog mode)
 cd ../firmware && cargo build --release
 probe-rs download --chip STM32F401RETx \
     ../target/thumbv7em-none-eabihf/release/firmware
@@ -71,8 +72,8 @@ Requires [probe-rs](https://probe.rs) and an ST-Link on the Nucleo board.
 **MCU:** STM32F401RE — Cortex-M4 @ 84 MHz (configured via PLL: HSI → /8 → ×168 → /4)
 
 ```
-PA0  — ADC1 CH0  (analogue in)
-PA1  — ADC1 CH1  (analogue in)
+PA0  — ADC1 CH0  (analog in)
+PA1  — ADC1 CH1  (analog in)
 PA6  — TIM3 CH1  (PWM capture in)
 PA8  — TIM1 CH1  (PWM out 25%)
 PA9  — TIM1 CH2  (PWM out 50%)
@@ -80,10 +81,56 @@ PA10 — TIM1 CH3  (PWM out 75%)
 PA11 — TIM1 CH4  (PWM out 10%)
 ```
 
----
 
-## Roadmap
+## Getting Started
 
-- [ ] Bootloader: CRC-32 verification of firmware image before jump (currently validates SP + reset vector only)
-- [ ] MPU: MemFault handler with defmt stack dump — catch overflows with context, not just a hang
-- [ ] MPU: per-task stack regions — enforce isolation between Embassy async tasks
+### Prerequisites
+- [Rust](https://rust-lang.org/) with nightly toolchain (for async features)
+- [cargo-binutils](https://github.com/rust-embedded/cargo-binutils) for flashing
+- [probe-rs](https://probe.rs) for flashing and debugging
+- ST-Link V2 programmer/mini programmer
+
+### Quick Start
+
+1. **Clone the repository**
+```bash
+git clone /path/to/embedded_daq_system
+```
+
+2. **Build and flash bootloader**
+```bash
+cd embedded_daq_system/bootloader
+cargo build --release
+probe-rs download --chip STM32F401RETx target/thumbv7em-none-eabihf/release/bootloader
+cd ..
+```
+
+3. **Flash analog mode firmware**
+```bash
+cd firmware
+cargo build --release
+probe-rs download --chip STM32F401RETx target/thumbv7em-none-eabihf/release/firmware
+cd ..
+```
+
+4. **Run with RTT debugging**
+```bash
+probe-rs run --chip STM32F401RETx target/thumbv7em-none-eabihf/release/firmware
+```
+
+### Build Variants
+
+#### Analog Mode
+```bash
+cargo build --release
+cargo run --release --features analog
+```
+
+#### Digital Mode
+```bash
+cargo build --release --no-default-features --features digital
+cargo run --release --no-default-features --features digital
+```
+
+
+
