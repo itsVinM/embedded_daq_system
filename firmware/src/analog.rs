@@ -4,12 +4,13 @@ use embassy_stm32::{
     bind_interrupts, dma, peripherals,
     Peri,
 };
+use shared::DmaBuf;
 
 bind_interrupts!(struct Irqs {
     DMA2_STREAM0 => dma::InterruptHandler<peripherals::DMA2_CH0>;
 });
 
-static mut ADC_BUF: [u16; 4096] = [0u16; 4096];
+static mut ADC_BUF: DmaBuf<u16, 4096> = DmaBuf::new();
 
 
 pub struct AnalogSampler {
@@ -63,7 +64,7 @@ pub async fn adc_task(
     let channel0: AnyAdcChannel<peripherals::ADC1> = pin0.degrade_adc();
     let channel1: AnyAdcChannel<peripherals::ADC1> = pin1.degrade_adc();
     
-    let buf = unsafe { & mut ADC_BUF };
+    let buf = unsafe { ADC_BUF.as_mut_slice() };
 
     let mut ring = adc_driver.into_ring_buffered(
         dma,
