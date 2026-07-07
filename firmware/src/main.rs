@@ -87,24 +87,21 @@ async fn main(spawner: Spawner) {
 
 
 async fn health_check(rcc: Peri<'_, RCC>){
-    // Peripherals will be checked when initialized 
-    // due to Rust ownership rules.
-    //
     let clock_status = health::check_clock(rcc);
     if clock_status != HealthStatus::Ready {
-        info!("clock FAILED: {}", clock_status.as_str());
+        info!("health FAILED: {}", clock_status.as_str());
         loop {}
     }
 
     let canary_status = health::check_stack_canary();
     if canary_status != HealthStatus::Ready {
-        info!("adc FAILED: {}", canary_status.as_str());
+        info!("health FAILED: {}", canary_status.as_str());
         loop {}
     }
 
     let ram_status = health::check_ram();
     if ram_status != HealthStatus::Ready {
-        info!("adc FAILED: {}", ram_status.as_str());
+        info!("health FAILED: {}", ram_status.as_str());
         loop {}
     }
 }

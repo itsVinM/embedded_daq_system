@@ -60,7 +60,7 @@ pub async fn adc_task(
     mut pin0: Peri<'static, peripherals::PA0>,
     mut pin1: Peri<'static, peripherals::PA1>,
 ) {
-    let mut adc_driver = Adc::new(adc);
+    let adc_driver = Adc::new(adc);
     let channel0: AnyAdcChannel<peripherals::ADC1> = pin0.degrade_adc();
     let channel1: AnyAdcChannel<peripherals::ADC1> = pin1.degrade_adc();
     

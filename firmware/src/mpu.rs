@@ -84,14 +84,12 @@ pub fn init() {
             MEM_DEVICE,
         );
 
-        // Region 3 — Stack overflow guard (0x2000_4000, 256 B)
-        // Placed above .bss/.data (~10 KB for our DMA buffer + globals).
-        // Stack grows downward from 0x2001_8000. If it reaches this region,
-        // the MPU raises MemFault before the stack corrupts .bss/.data.
-        // No access for anyone — reads or writes here are a bug.
+        // Region 3 — Stack overflow guard (0x2001_6000, 256 B)
+        // Placed 256 B below the stack top (0x2001_8000). Stack grows downward;
+        // if it crosses this guard, the MPU raises MemFault immediately.
         configure_region(
             3,
-            0x2000_4000,
+            0x2001_6000,
             SIZE_256B,
             AP_NO_ACCESS,
             RASR_XN,

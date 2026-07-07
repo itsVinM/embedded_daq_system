@@ -14,12 +14,7 @@ bind_interrupts!(struct Irqs {
 });
 
 // DATA STRUCTURE
-pub struct PwmSignal {
-    pub frequency_hz: u32,
-    pub duty_cycle_pct: u32,
-}
-
-const CLOCK_SPEED: u32 = 10; // Clock speed in kHz
+const CLOCK_SPEED_KHZ: u32 = 10;
 
 // PWM OUTPUT TASK - All 4 TIM1 channels simultaneously
 /// Generates 4 independent PWM signals:
@@ -42,13 +37,13 @@ pub async fn pwm_task(
     let ch4_pin = PwmPin::new(pa11, OutputType::PushPull);
 
     // Initialize SimplePwm with all 4 channels
-    let mut pwm = SimplePwm::new(
+    let pwm = SimplePwm::new(
         tim1,
         Some(ch1_pin),  // Ch1 - PA8
         Some(ch2_pin),  // Ch2 - PA9
         Some(ch3_pin),  // Ch3 - PA10
         Some(ch4_pin),  // Ch4 - PA11
-        khz(CLOCK_SPEED),
+        khz(CLOCK_SPEED_KHZ),
         Default::default(),
     );
 
@@ -61,14 +56,7 @@ pub async fn pwm_task(
     channels.ch3.enable();
     channels.ch4.enable();
 
-    info!("╔════════════════════════════════════════════╗");
-    info!("║  PWM Task - 4 Channel Generator           ║");
-    info!("╚════════════════════════════════════════════╝");
-    info!("✓ PA8  (TIM1 Ch1) @ 25% duty cycle");
-    info!("✓ PA9  (TIM1 Ch2) @ 50% duty cycle");
-    info!("✓ PA10 (TIM1 Ch3) @ 75% duty cycle");
-    info!("✓ PA11 (TIM1 Ch4) @ 10% duty cycle");
-    info!("Frequency: {} kHz", CLOCK_SPEED);
+    info!("pwm: PA8=25% PA9=50% PA10=75% PA11=10% {} kHz", CLOCK_SPEED_KHZ);
 
     loop {
         // Set different duty cycles for each channel
@@ -95,16 +83,12 @@ pub async fn capture_task(
         pa6,
         Irqs,
         embassy_stm32::gpio::Pull::None,
-        khz(CLOCK_SPEED),  // Must match pwm_task frequency!
+        khz(CLOCK_SPEED_KHZ),
     );
 
     pwm_input.enable();
 
-    info!("╔════════════════════════════════════════════╗");
-    info!("║  Capture Task - Signal Measurement        ║");
-    info!("╚════════════════════════════════════════════╝");
-    info!("✓ PA6 (TIM3 Ch1) - Measuring input signal");
-    info!("Connect any PWM output (PA8/PA9/PA10/PA11) → PA6");
+    info!("capture: PA6 (TIM3 Ch1) measuring input — connect PWM out → PA6");
 
     loop {
         // Wait between measurements

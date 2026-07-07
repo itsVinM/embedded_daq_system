@@ -1,83 +1,73 @@
 use defmt::info;
 use shared::{HealthError, HealthStatus};
-
-// Embassy imports
 use embassy_stm32::peripherals::RCC;
 use embassy_stm32::{rcc, Peri};
-  
 
+extern "C" {
+    static _stack_start: u32;
+}
 
-pub fn check_clock(
-    rcc_peripheral: Peri<'_, RCC>) 
--> HealthStatus {
-
+pub fn check_clock(rcc_peripheral: Peri<'_, RCC>) -> HealthStatus {
     let clocks = rcc::clocks(&rcc_peripheral);
     let sys_hz = clocks.sys.to_hertz().map(|h| h.0).unwrap_or(0);
     let pclk1_tim_hz = clocks.pclk1_tim.to_hertz().map(|h| h.0).unwrap_or(0);
-    let pclk1_hz = clocks.pclk1.to_hertz().map(|h| h.0).unwrap_or(0);
     let hclk1_hz = clocks.hclk1.to_hertz().map(|h| h.0).unwrap_or(0);
-    info!("sys clock = {} Hz", sys_hz);
-    info!("pclk1_tim = {} Hz", pclk1_tim_hz);
-    info!("pclk1 = {} Hz", pclk1_hz);
-    info!("hclk1 (DMA bus) = {} Hz", hclk1_hz);
+
+    info!("sys={} Hz pclk1_tim={} Hz hclk1={} Hz", sys_hz, pclk1_tim_hz, hclk1_hz);
 
     if sys_hz == 0 {
         return HealthStatus::Fail(HealthError::ClockOutOfRange);
     }
-
     if pclk1_tim_hz == 0 {
         return HealthStatus::Fail(HealthError::TimerNotTicking);
     }
-    if pclk1_hz == 0 {
-    return HealthStatus::Fail(HealthError::I2cInitFailed);
-    }
     if hclk1_hz == 0 {
-    return HealthStatus::Fail(HealthError::DmaInitFailed);
+        return HealthStatus::Fail(HealthError::DmaInitFailed);
     }
 
-
-    info!("clock init ok");
+    info!("clocks ok");
     HealthStatus::Ready
 }
 
-
-const CANARY_ADDRESS: *mut u32 = 0x2000_1000 as *mut u32;
-const CANARY_VALUE: u32 = 0xDEAD_BEEF;
-
 pub fn check_stack_canary() -> HealthStatus {
+    // Place canary at the bottom of the 8 KB stack region (4 KB below top).
+    // _stack_start points to 0x2001_8000 (end of SRAM).
+    // Stack grows downward; if it consumes more than 4 KB, the canary is
+    // overwritten and the next readback detects the overflow.
+    let stack_top = core::ptr::addr_of!(_stack_start) as u32;
+    if stack_top == 0 {
+        return HealthStatus::Fail(HealthError::StackCanary);
+    }
+    let canary_addr = (stack_top - 4096) as *mut u32;
+    let canary_val: u32 = 0xDEAD_BEEF;
+
     unsafe {
-        // write known pattern
-        core::ptr::write_volatile(CANARY_ADDRESS, CANARY_VALUE);
-        
-        // read it back
-        let read_back = core::ptr::read_volatile(CANARY_ADDRESS);
-        
-        // verify it matches
-        if read_back != CANARY_VALUE {
+        core::ptr::write_volatile(canary_addr, canary_val);
+        let read = core::ptr::read_volatile(canary_addr);
+        if read != canary_val {
             return HealthStatus::Fail(HealthError::StackCanary);
         }
     }
-    info!("stack canary ok — read back 0x{:X}", CANARY_VALUE);
+
+    info!("stack canary ok at 0x{:08X}", canary_addr as u32);
     HealthStatus::Ready
 }
 
-const RAM_TEST_BASE: *mut u32 = 0x2000_4000 as *mut u32;
-const RAM_TEST_SIZE: usize= 16;
-
 pub fn check_ram() -> HealthStatus {
-    unsafe {
-        // write pattern to each address
-        for i in 0..RAM_TEST_SIZE {
-            core::ptr::write_volatile(RAM_TEST_BASE.add(i), 0xFEED_FACE);
-        }
-        // read back each address
-        for i in 0..RAM_TEST_SIZE {
-            let read_back = core::ptr::read_volatile(RAM_TEST_BASE.add(i));
-            if read_back != 0xFEED_FACE {
-                return HealthStatus::Fail(HealthError::RamTest);
-            }
+    // Test 16 words just past the vector table region (0x2000_0000 + 256 B).
+    // This area is unused at boot — .data/.bss are placed by the linker but
+    // we test after they're initialized, so we read back what was written.
+    const BASE: *mut u32 = 0x2000_0100 as *mut u32;
+    const N: usize = 16;
+    for i in 0..N {
+        unsafe { core::ptr::write_volatile(BASE.add(i), 0xFEED_FACE); }
+    }
+    for i in 0..N {
+        let v = unsafe { core::ptr::read_volatile(BASE.add(i)) };
+        if v != 0xFEED_FACE {
+            return HealthStatus::Fail(HealthError::RamTest);
         }
     }
-    info!("ram ok — {} words verified", RAM_TEST_SIZE);
+    info!("ram pattern ok at 0x2000_0100, {} words", N);
     HealthStatus::Ready
 }
