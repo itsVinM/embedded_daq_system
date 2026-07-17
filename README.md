@@ -24,17 +24,16 @@ Analogue and digital modes are selected at compile time via feature flags — no
 - **Two independent timers** — TIM1 as SimplePwm (output), TIM3 as PwmInput (input capture), wired via bind_interrupts!
 - **Boot integrity** — before spawning any task, the firmware verifies the clock tree, writes/reads a stack canary, and pattern-tests 16 words of SRAM using write_volatile/read_volatile
 - **MPU** — 4 hardware memory protection regions configured before init: flash read-only, SRAM no-execute, peripheral space device memory, stack overflow guard at 0x2000_4000
-- **Custom bootloader** — separate binary at 0x0800_0000; validates application SP and reset vector before writing VTOR and branching via msr msp / bx
 - **Async on Cortex-M4** — Embassy's cooperative scheduler; tasks yield at .await points, no preemption needed
 - **Zero heap** — no alloc, no dynamic dispatch; all buffers are static
 - **Feature-based mode selection** — compile-time analog/digital mode switching with no runtime branching
+- **USART2 transport** — PA2/PA3 for sending SamplePacket data to host
 
 ---
 
 ## Flash layout
 
 ```
-0x0800_0000  bootloader  (32 KB — sectors 0–1)
 0x0800_8000  firmware    (480 KB — sectors 2–7)
 0x2000_0000  SRAM        (96 KB)
 0x2000_4000    └── stack overflow guard (256 B, MPU region 3 → MemFault)
@@ -44,25 +43,39 @@ Analogue and digital modes are selected at compile time via feature flags — no
 ## Build & flash
 
 ```bash
-# 1. Flash bootloader
-cd bootloader && cargo build --release
-probe-rs download --chip STM32F401RETx \
-    ../target/thumbv7em-none-eabihf/release/bootloader
+# Build and flash firmware (analog mode)
+cd firmware && cargo build --release
+probe-rs download --chip STM32F401RETx target/thumbv7em-none-eabihf/release/firmware
 
-# 2. Flash firmware (analog mode)
-cd ../firmware && cargo build --release
-probe-rs download --chip STM32F401RETx \
-    ../target/thumbv7em-none-eabihf/release/firmware
-
-# 3. Attach RTT and run
-probe-rs run --chip STM32F401RETx \
-    ../target/thumbv7em-none-eabihf/release/firmware
+# Attach RTT and run
+probe-rs run --chip STM32F401RETx target/thumbv7em-none-eabihf/release/firmware
 
 # Digital mode
 cargo build --release --no-default-features --features digital
 ```
 
 Requires [probe-rs](https://probe.rs) and an ST-Link on the Nucleo board.
+
+---
+
+## Host Software
+
+A Python client is included to receive data from the firmware over USART2:
+
+```bash
+cd host && python daq_client.py
+```
+
+### Host Protocol
+- Baud rate: 115200
+- Frame format: SamplePacket binary (fixed 2.5 KB)
+  - Magic: 2 bytes (0xDA71)
+  - Sequence number: 2 bytes
+  - Sample count: 2 bytes
+  - 32 samples × (1 + 1 + 4 + 4) = 1280 bytes
+- Commands: Start stream, stop stream, query config (via shell interface)
+
+The Python client automatically detects the connection and logs ADC measurements in real time.
 
 ---
 
@@ -74,6 +87,8 @@ Requires [probe-rs](https://probe.rs) and an ST-Link on the Nucleo board.
 ```
 PA0  — ADC1 CH0  (analog in)
 PA1  — ADC1 CH1  (analog in)
+PA2  — USART2 TX (host communication)
+PA3  — USART2 RX (host communication)
 PA6  — TIM3 CH1  (PWM capture in)
 PA8  — TIM1 CH1  (PWM out 25%)
 PA9  — TIM1 CH2  (PWM out 50%)
@@ -89,6 +104,7 @@ PA11 — TIM1 CH4  (PWM out 10%)
 - [cargo-binutils](https://github.com/rust-embedded/cargo-binutils) for flashing
 - [probe-rs](https://probe.rs) for flashing and debugging
 - ST-Link V2 programmer/mini programmer
+- Python 3.6+ (for host client)
 
 ### Quick Start
 
@@ -97,15 +113,7 @@ PA11 — TIM1 CH4  (PWM out 10%)
 git clone /path/to/embedded_daq_system
 ```
 
-2. **Build and flash bootloader**
-```bash
-cd embedded_daq_system/bootloader
-cargo build --release
-probe-rs download --chip STM32F401RETx target/thumbv7em-none-eabihf/release/bootloader
-cd ..
-```
-
-3. **Flash analog mode firmware**
+2. **Build and flash analog mode firmware**
 ```bash
 cd firmware
 cargo build --release
@@ -113,10 +121,12 @@ probe-rs download --chip STM32F401RETx target/thumbv7em-none-eabihf/release/firm
 cd ..
 ```
 
-4. **Run with RTT debugging**
+3. **Run host client**
 ```bash
-probe-rs run --chip STM32F401RETx target/thumbv7em-none-eabihf/release/firmware
+cd host
+python daq_client.py COM3
 ```
+(Replace COM3 with your ST-Link port)
 
 ### Build Variants
 

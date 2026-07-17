@@ -10,3 +10,13 @@ MEMORY
   FLASH : ORIGIN = 0x08008000, LENGTH = 480K
   RAM   : ORIGIN = 0x20000000, LENGTH = 96K
 }
+
+SECTIONS
+{
+  .sram_test (NOLOAD) : ALIGN(4)
+  {
+    _sram_test_start = .;
+    . = . + 64;
+    _sram_test_end = .;
+  } > RAM
+}

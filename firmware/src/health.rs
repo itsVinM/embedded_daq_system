@@ -5,6 +5,8 @@ use embassy_stm32::{rcc, Peri};
 
 extern "C" {
     static _stack_start: u32;
+    static _sram_test_start: u32;
+    static _sram_test_end: u32;
 }
 
 pub fn check_clock(rcc_peripheral: Peri<'_, RCC>) -> HealthStatus {
@@ -22,7 +24,7 @@ pub fn check_clock(rcc_peripheral: Peri<'_, RCC>) -> HealthStatus {
         return HealthStatus::Fail(HealthError::TimerNotTicking);
     }
     if hclk1_hz == 0 {
-        return HealthStatus::Fail(HealthError::DmaInitFailed);
+        return HealthStatus::Fail(HealthError::ClockHclkNotRunning);
     }
 
     info!("clocks ok");
@@ -54,20 +56,22 @@ pub fn check_stack_canary() -> HealthStatus {
 }
 
 pub fn check_ram() -> HealthStatus {
-    // Test 16 words just past the vector table region (0x2000_0000 + 256 B).
-    // This area is unused at boot — .data/.bss are placed by the linker but
-    // we test after they're initialized, so we read back what was written.
-    const BASE: *mut u32 = 0x2000_0100 as *mut u32;
-    const N: usize = 16;
-    for i in 0..N {
-        unsafe { core::ptr::write_volatile(BASE.add(i), 0xFEED_FACE); }
+    let start = core::ptr::addr_of!(_sram_test_start) as u32;
+    let end = core::ptr::addr_of!(_sram_test_end) as u32;
+    let n_words = ((end - start) / 4) as usize;
+    if n_words == 0 {
+        return HealthStatus::Ready;
     }
-    for i in 0..N {
-        let v = unsafe { core::ptr::read_volatile(BASE.add(i)) };
+    let base = start as *mut u32;
+    for i in 0..n_words {
+        unsafe { core::ptr::write_volatile(base.add(i), 0xFEED_FACE); }
+    }
+    for i in 0..n_words {
+        let v = unsafe { core::ptr::read_volatile(base.add(i)) };
         if v != 0xFEED_FACE {
             return HealthStatus::Fail(HealthError::RamTest);
         }
     }
-    info!("ram pattern ok at 0x2000_0100, {} words", N);
+    info!("ram pattern ok at 0x{:08X}, {} words", start, n_words);
     HealthStatus::Ready
 }

@@ -56,15 +56,14 @@ pub async fn pwm_task(
     channels.ch3.enable();
     channels.ch4.enable();
 
+    channels.ch1.set_duty_cycle_fraction(1, 4);  // 25%
+    channels.ch2.set_duty_cycle_fraction(1, 2);  // 50%
+    channels.ch3.set_duty_cycle_fraction(3, 4);  // 75%
+    channels.ch4.set_duty_cycle_fraction(1, 10); // 10%
+
     info!("pwm: PA8=25% PA9=50% PA10=75% PA11=10% {} kHz", CLOCK_SPEED_KHZ);
 
     loop {
-        // Set different duty cycles for each channel
-        channels.ch1.set_duty_cycle_fraction(1, 4);  // 25%
-        channels.ch2.set_duty_cycle_fraction(1, 2);  // 50%
-        channels.ch3.set_duty_cycle_fraction(3, 4);  // 75%
-        channels.ch4.set_duty_cycle_fraction(1, 10); // 10%
-
         Timer::after_millis(5000).await;
     }
 }

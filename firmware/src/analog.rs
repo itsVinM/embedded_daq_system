@@ -4,13 +4,16 @@ use embassy_stm32::{
     bind_interrupts, dma, peripherals,
     Peri,
 };
-use shared::DmaBuf;
+use embassy_time::Timer;
+use shared::{SamplePacket, AcquisitionConfig, ChannelId, AdcCalibration, ChannelId};
+
+use transport::{Transport};
 
 bind_interrupts!(struct Irqs {
     DMA2_STREAM0 => dma::InterruptHandler<peripherals::DMA2_CH0>;
 });
 
-static mut ADC_BUF: DmaBuf<u16, 4096> = DmaBuf::new();
+static mut ADC_BUF: shared::DmaBuf<u16, 4096> = shared::DmaBuf::new();
 
 
 pub struct AnalogSampler {
@@ -59,6 +62,7 @@ pub async fn adc_task(
     dma: Peri<'static, peripherals::DMA2_CH0>,
     mut pin0: Peri<'static, peripherals::PA0>,
     mut pin1: Peri<'static, peripherals::PA1>,
+    mut transport: Transport,
 ) {
     let adc_driver = Adc::new(adc);
     let channel0: AnyAdcChannel<peripherals::ADC1> = pin0.degrade_adc();
@@ -79,17 +83,62 @@ pub async fn adc_task(
 
     let mut adc_sampler = AnalogSampler::new();
     let mut measurements = [0u16; 2048];
+    let mut packet = SamplePacket::new();
+    let mut seq = 0u16;
+    let calibration = AdcCalibration::default();
+    let mut last_timestamp = 0u32;
     
     loop {
-        let Ok(n) = ring.read(&mut measurements).await else { 
-            continue 
+        let n = ring.read(&mut measurements).await;
+        if let Err(e) = n {
+            info!("adc ring read error: Overrun {} samples", e);
+            continue;
         };
+        let n = n.unwrap_or(0);
         let count = n.min(measurements.len());
-        if count == 0 { continue; }
+        if count == 0 { 
+            info!("adc zero-length read");
+            continue; 
+        }
         
         adc_sampler.update_analog(&measurements, count);
         adc_sampler.log();
         
+        // Convert ADC counts to mV using calibration
+        let timestamp = last_timestamp;
+        let pa0_mv = adc_sampler.pa0_mv;
+        let pa1_mv = adc_sampler.pa1_mv;
+        
+        // Push samples to packet
+        if !isnan(pa0_mv) {
+            packet.push(ChannelId::Analog0, timestamp, pa0_mv);
+        }
+        if !isnan(pa1_mv) {
+            packet.push(ChannelId::Analog1, timestamp, pa1_mv);
+        }
+        
+        if packet.is_full() {
+            packet.finalize(seq);
+            transport.send_packet(&packet).await;
+            info!("transport: packet {} sent (seq: {}), samples: {}",
+                  seq, seq, packet.count);
+            seq = seq.wrapping_add(1);
+            packet = SamplePacket::new();
+        }
+
+        last_timestamp = last_timestamp.wrapping_add(count as u32 * 100);
+    }
+}
+
+fn isnan(value: u32) -> bool {
+    value == 0 || value > 65535
+}
+
+fn get_timestamp() -> u32 {
+    static mut timestamp_counter: u32 = 0;
+    unsafe {
+        timestamp_counter = timestamp_counter.wrapping_add(100);
+        timestamp_counter
     }
 }
 

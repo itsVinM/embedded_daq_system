@@ -11,12 +11,13 @@ use embassy_stm32::Peri;
 use embassy_stm32::peripherals::RCC;
 use embassy_stm32::Config;
 use panic_probe as _;
-use shared::HealthStatus;
+use shared::{HealthStatus, AcquisitionConfig};
 
 mod health;
 mod mpu;
 mod analog;
 mod digital;
+mod transport;
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
@@ -44,6 +45,27 @@ async fn main(spawner: Spawner) {
     info!("booting...");
     health_check(peripherals.RCC).await;
 
+    // Configure flash ART accelerator: 5 wait states for 84 MHz @ 3.3V
+    // STM32F401RE requires 5 WS at 84 MHz per RM0368 §3.5.1
+    unsafe {
+        let flash = &*embassy_stm32::pac::FLASH::ptr();
+        flash.acr().modify(|w| {
+            w.set_latency(5);
+            w.set_prften(true);
+            w.set_icen(true);
+            w.set_dcen(true);
+        });
+    }
+
+    // Initialize transport for host communication
+    let mut transport = transport::Transport::new(
+        peripherals.USART2,
+        peripherals.PA2,   // TX
+        peripherals.PA3,   // RX
+    );
+    transport.set_enabled(true);
+    spawner.spawn(transport::transport_task(transport));
+
     #[cfg(feature = "analog")]
     {
         info!("=== ANALOG MODE ===");
@@ -65,7 +87,7 @@ async fn main(spawner: Spawner) {
             peripherals.PA10,  // Ch3 - 75% duty
             peripherals.PA11,  // Ch4 - 10% duty
         ).unwrap());
- 
+  
         // INPUT CAPTURE: PA6 (TIM3 Ch1)
         spawner.spawn(digital::capture_task(
             peripherals.TIM3,
