@@ -57,15 +57,6 @@ async fn main(spawner: Spawner) {
         });
     }
 
-    // Initialize transport for host communication
-    let mut transport = transport::Transport::new(
-        peripherals.USART2,
-        peripherals.PA2,   // TX
-        peripherals.PA3,   // RX
-    );
-    transport.set_enabled(true);
-    spawner.spawn(transport::transport_task(transport));
-
     #[cfg(feature = "analog")]
     {
         info!("=== ANALOG MODE ===");

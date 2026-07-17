@@ -3,9 +3,6 @@ use embassy_executor::Spawner;
 use embassy_stm32::Peri;
 use shared::{SamplePacket, AcquisitionConfig, ChannelId, AdcCalibration};
 
-use crate::analog::AnalogSampler;
-use transport::Transport;
-
 pub async fn transport_task(mut transport: Transport) -> ! {
     let mut packet = SamplePacket::new();
     let mut seq = 0u16;
@@ -31,7 +28,7 @@ pub async fn transport_task(mut transport: Transport) -> ! {
             packet.finalize(seq);
             transport.send_packet(&packet).await;
             info!("transport: packet {} sent (seq: {}), samples: {}",
-                  defmt::Display2Format(&transport), seq, packet.count);
+                  seq, seq, packet.count);
             seq = seq.wrapping_add(1);
             packet = SamplePacket::new();
         }

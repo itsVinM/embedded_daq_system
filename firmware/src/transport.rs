@@ -23,8 +23,8 @@ impl Transport {
         tx: Peri<'static, embassy_stm32::peripherals::PA2>,
         rx: Peri<'static, embassy_stm32::peripherals::PA3>,
     ) -> Self {
-        let config = Config::default();
-        let uart = Uart::new(usart, tx, rx, Irqs, config, 115_200);
+        let config = Config::new(115_200);
+        let uart = Uart::new(usart, tx, rx, config, Irqs);
         Self { uart, enabled: false }
     }
 
