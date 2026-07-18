@@ -204,6 +204,100 @@ impl HealthStatus {
     }
 }
 
+// ─── Fault Injection ─────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum Protocol {
+    Spi   = 0,
+    I2c   = 1,
+    Uart  = 2,
+    Can   = 3,
+    OneWire = 4,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum FaultType {
+    BitFlip         = 0x01,
+    StuckAtZero     = 0x02,
+    StuckAtOne      = 0x03,
+    BitDelay        = 0x04,
+    ClockGlitch     = 0x05,
+    FrameCorrupt    = 0x06,
+    NackInjection   = 0x07,
+    ParityError     = 0x08,
+    CrcCorrupt      = 0x09,
+    BusLockup       = 0x0A,
+    Overrun         = 0x0B,
+    Timeout         = 0x0C,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum FaultCommand {
+    Arm      = 0x01,
+    Disarm   = 0x02,
+    Trigger  = 0x03,
+    Status   = 0x04,
+    Reset    = 0x05,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum FaultResult {
+    Armed        = 0x01,
+    Disarmed     = 0x02,
+    Triggered    = 0x03,
+    Busy         = 0x04,
+    Error        = 0x05,
+    Completed    = 0x06,
+}
+
+#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+pub struct FaultConfig {
+    pub protocol: Protocol,
+    pub fault_type: FaultType,
+    pub target_bit: u8,
+    pub duration_us: u32,
+    pub repeat_count: u8,
+    pub probability_permille: u16,
+}
+
+impl FaultConfig {
+    pub const fn new(protocol: Protocol, fault_type: FaultType) -> Self {
+        Self {
+            protocol,
+            fault_type,
+            target_bit: 0,
+            duration_us: 0,
+            repeat_count: 1,
+            probability_permille: 1000,
+        }
+    }
+
+    pub const fn at_bit(mut self, bit: u8) -> Self {
+        self.target_bit = bit;
+        self
+    }
+
+    pub const fn for_us(mut self, us: u32) -> Self {
+        self.duration_us = us;
+        self
+    }
+
+    pub const fn repeat(mut self, n: u8) -> Self {
+        self.repeat_count = n;
+        self
+    }
+
+    pub const fn probability(mut self, permille: u16) -> Self {
+        self.probability_permille = permille;
+        self
+    }
+}
+
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -293,5 +387,56 @@ mod tests {
     fn health_error_new_variant() {
         let err = HealthStatus::Fail(HealthError::ClockHclkNotRunning);
         assert_eq!(err.as_str(), "FAIL:hclk\n");
+    }
+
+    #[test]
+    fn fault_config_new() {
+        let cfg = FaultConfig::new(Protocol::Spi, FaultType::BitFlip);
+        assert_eq!(cfg.protocol, Protocol::Spi);
+        assert_eq!(cfg.fault_type, FaultType::BitFlip);
+        assert_eq!(cfg.target_bit, 0);
+        assert_eq!(cfg.duration_us, 0);
+        assert_eq!(cfg.repeat_count, 1);
+        assert_eq!(cfg.probability_permille, 1000);
+    }
+
+    #[test]
+    fn fault_config_builder() {
+        let cfg = FaultConfig::new(Protocol::I2c, FaultType::NackInjection)
+            .at_bit(3)
+            .for_us(100)
+            .repeat(5)
+            .probability(500);
+        assert_eq!(cfg.protocol, Protocol::I2c);
+        assert_eq!(cfg.fault_type, FaultType::NackInjection);
+        assert_eq!(cfg.target_bit, 3);
+        assert_eq!(cfg.duration_us, 100);
+        assert_eq!(cfg.repeat_count, 5);
+        assert_eq!(cfg.probability_permille, 500);
+    }
+
+    #[test]
+    fn fault_type_repr() {
+        assert_eq!(FaultType::BitFlip as u8, 0x01);
+        assert_eq!(FaultType::CrcCorrupt as u8, 0x09);
+        assert_eq!(FaultType::Timeout as u8, 0x0C);
+    }
+
+    #[test]
+    fn protocol_repr() {
+        assert_eq!(Protocol::Spi as u8, 0);
+        assert_eq!(Protocol::OneWire as u8, 4);
+    }
+
+    #[test]
+    fn fault_command_repr() {
+        assert_eq!(FaultCommand::Arm as u8, 0x01);
+        assert_eq!(FaultCommand::Reset as u8, 0x05);
+    }
+
+    #[test]
+    fn fault_result_repr() {
+        assert_eq!(FaultResult::Armed as u8, 0x01);
+        assert_eq!(FaultResult::Completed as u8, 0x06);
     }
 }
