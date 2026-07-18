@@ -138,7 +138,7 @@ use embassy_stm32::gpio::{Level, Output, Speed, Input, Pull};
 #[cfg(feature = "fault")]
 use embassy_stm32::Peri;
 #[cfg(feature = "fault")]
-use embassy_stm32::peripherals::{PA2, PA3};
+use embassy_stm32::peripherals::{PB6, PB7};
 
 pub struct UartBitbang<'d> {
     #[cfg(feature = "fault")]
@@ -151,7 +151,7 @@ pub struct UartBitbang<'d> {
 
 #[cfg(feature = "fault")]
 impl<'d> UartBitbang<'d> {
-    pub fn new(tx_pin: Peri<'d, PA2>, rx_pin: Peri<'d, PA3>) -> Self {
+    pub fn new(tx_pin: Peri<'d, PB6>, rx_pin: Peri<'d, PB7>) -> Self {
         Self {
             tx: Output::new(tx_pin, Level::High, Speed::High),
             input: Input::new(rx_pin, Pull::Up),
@@ -253,7 +253,7 @@ mod tests {
     }
 
     #[test]
-    fn bit_wraps_on.overflow() {
+    fn bit_wraps_on_overflow() {
         assert_eq!(bit_flip(0xFF, 8), 0xFE);
         assert_eq!(bit_flip(0xFF, 16), 0xFE);
     }

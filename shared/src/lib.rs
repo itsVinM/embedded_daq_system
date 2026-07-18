@@ -312,77 +312,6 @@ pub trait FaultInjector<'d, B: ?Sized> {
     fn reset_stats(&mut self);
 }
 
-// ─── Telemetry ────────────────────────────────────────────────────────────────
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u8)]
-pub enum TelemetryChannel {
-    Voltage   = 0,
-    Current   = 1,
-    Temperature = 2,
-    Rtc       = 3,
-    Gpio      = 4,
-}
-
-#[derive(Debug, Clone, Copy)]
-#[repr(C)]
-pub struct TelemetryFrame {
-    pub channel: TelemetryChannel,
-    pub timestamp_us: u32,
-    pub value_i32: i32,
-    pub value_u32: u32,
-    pub flags: u16,
-}
-
-/// Generic telemetry reader trait.
-/// `T` is the concrete sensor/driver type — each backend provides its own.
-pub trait TelemetryReader<'d, T> {
-    type Error;
-
-    fn read_raw(&mut self, sensor: &'d T) -> Result<u32, Self::Error>;
-    fn read_calibrated(&mut self, sensor: &'d T) -> Result<TelemetryFrame, Self::Error>;
-    fn channel(&self) -> TelemetryChannel;
-    fn last_reading(&self) -> Option<TelemetryFrame>;
-}
-
-/// Aggregator that collects telemetry from multiple readers.
-pub struct TelemetryBus<const N: usize> {
-    frames: [TelemetryFrame; N],
-    count: usize,
-}
-
-impl<const N: usize> TelemetryBus<N> {
-    pub const fn new() -> Self {
-        Self {
-            frames: [TelemetryFrame {
-                channel: TelemetryChannel::Voltage,
-                timestamp_us: 0,
-                value_i32: 0,
-                value_u32: 0,
-                flags: 0,
-            }; N],
-            count: 0,
-        }
-    }
-
-    pub fn push(&mut self, frame: TelemetryFrame) {
-        if self.count < N {
-            self.frames[self.count] = frame;
-            self.count += 1;
-        }
-    }
-
-    pub fn drain(&mut self) -> &[TelemetryFrame] {
-        let slice = &self.frames[..self.count];
-        self.count = 0;
-        slice
-    }
-
-    pub fn is_full(&self) -> bool {
-        self.count >= N
-    }
-}
-
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -520,51 +449,6 @@ mod tests {
         assert_eq!(FaultResult::Completed as u8, 0x06);
     }
 
-    // ── Telemetry tests ─────────────────────────────────────────────────
-
-    #[test]
-    fn telemetry_bus_push_and_drain() {
-        let mut bus = TelemetryBus::<4>::new();
-        assert!(!bus.is_full());
-
-        bus.push(TelemetryFrame {
-            channel: TelemetryChannel::Voltage,
-            timestamp_us: 100,
-            value_i32: 3300,
-            value_u32: 3300,
-            flags: 0,
-        });
-        bus.push(TelemetryFrame {
-            channel: TelemetryChannel::Temperature,
-            timestamp_us: 200,
-            value_i32: 25,
-            value_u32: 25,
-            flags: 0,
-        });
-
-        let frames = bus.drain();
-        assert_eq!(frames.len(), 2);
-        assert_eq!(frames[0].channel, TelemetryChannel::Voltage);
-        assert_eq!(frames[1].channel, TelemetryChannel::Temperature);
-        assert_eq!(bus.drain().len(), 0);
-    }
-
-    #[test]
-    fn telemetry_bus_overflow() {
-        let mut bus = TelemetryBus::<2>::new();
-        for i in 0..5u32 {
-            bus.push(TelemetryFrame {
-                channel: TelemetryChannel::Current,
-                timestamp_us: i,
-                value_i32: i as i32,
-                value_u32: i,
-                flags: 0,
-            });
-        }
-        assert!(bus.is_full());
-        assert_eq!(bus.drain().len(), 2);
-    }
-
     // ── Mock FaultInjector test ──────────────────────────────────────────
 
     struct MockBus;
@@ -632,7 +516,11 @@ mod tests {
 
     #[test]
     fn trait_generic_dispatch() {
-        fn dispatch<I: FaultInjector<'static, MockBus>>(inj: &mut I, bus: &mut MockBus) {
+        use core::fmt::Debug;
+        fn dispatch<I: FaultInjector<'static, MockBus>>(inj: &mut I, bus: &mut MockBus)
+        where
+            I::Error: Debug,
+        {
             inj.arm().unwrap();
             inj.fire(bus).unwrap();
         }

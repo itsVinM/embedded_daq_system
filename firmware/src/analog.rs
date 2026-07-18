@@ -5,7 +5,7 @@ use embassy_stm32::{
     Peri,
 };
 
-use shared::{SamplePacket, AdcCalibration};
+use shared::{SamplePacket, AdcCalibration, ChannelId};
 
 use crate::transport::Transport;
 
@@ -86,7 +86,7 @@ pub async fn adc_task(
     let mut packet = SamplePacket::new();
     let mut seq = 0u16;
     let calibration = AdcCalibration::default();
-    let mut last_timestamp = 0u32;
+    let mut last_timestamp: u32 = 0;
     
     loop {
         let n = ring.read(&mut measurements).await;

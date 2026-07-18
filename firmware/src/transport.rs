@@ -1,5 +1,5 @@
 use defmt::info;
-use embassy_stm32::peripherals::USART2;
+use embassy_stm32::peripherals::{USART2, PA2, PA3, DMA1_CH5, DMA1_CH6};
 use embassy_stm32::Peri;
 use embassy_stm32::usart::{Config, Uart};
 use embassy_stm32::mode::Async;
@@ -9,6 +9,8 @@ use shared::{SamplePacket, AcquisitionConfig};
 
 bind_interrupts!(struct Irqs {
     USART2 => embassy_stm32::usart::InterruptHandler<USART2>;
+    DMA1_STREAM5 => embassy_stm32::dma::InterruptHandler<DMA1_CH5>;
+    DMA1_STREAM6 => embassy_stm32::dma::InterruptHandler<DMA1_CH6>;
 });
 
 pub struct Transport {
@@ -17,32 +19,29 @@ pub struct Transport {
 }
 
 impl Transport {
-    /// Create a new USART2 transport on PA2 (TX) and PA3 (RX) at 115200 baud.
     pub fn new(
         usart: Peri<'static, USART2>,
-        tx: Peri<'static, embassy_stm32::peripherals::PA2>,
-        rx: Peri<'static, embassy_stm32::peripherals::PA3>,
+        tx: Peri<'static, PA2>,
+        rx: Peri<'static, PA3>,
+        tx_dma: Peri<'static, DMA1_CH6>,
+        rx_dma: Peri<'static, DMA1_CH5>,
     ) -> Self {
-        let config = Config::new(115_200);
-        let uart = Uart::new(usart, tx, rx, config, Irqs);
+        let mut config = Config::default();
+        config.baudrate = 115_200;
+        let uart = Uart::new(usart, rx, tx, tx_dma, rx_dma, Irqs, config)
+            .expect("uart init failed");
         Self { uart, enabled: false }
     }
 
-    /// Enable or disable the transport.
     pub fn set_enabled(&mut self, enabled: bool) {
         self.enabled = enabled;
     }
 
-    /// Send a populated sample packet to the host.
-    /// Only sends if transport is enabled.
     pub async fn send_packet(&mut self, pkt: &SamplePacket) {
-        if !self.enabled {
-            return;
-        }
+        if !self.enabled { return; }
         let _ = self.uart.write(pkt.as_bytes()).await;
     }
 
-    /// Send the current acquisition configuration to the host.
     pub async fn send_config(&mut self, cfg: &AcquisitionConfig) {
         let bytes = unsafe {
             core::slice::from_raw_parts(

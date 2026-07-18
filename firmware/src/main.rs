@@ -20,8 +20,6 @@ mod digital;
 mod transport;
 #[cfg(feature = "fault")]
 mod fault;
-#[cfg(feature = "telemetry")]
-mod telemetry;
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
@@ -52,23 +50,27 @@ async fn main(spawner: Spawner) {
     // Configure flash ART accelerator: 5 wait states for 84 MHz @ 3.3V
     // STM32F401RE requires 5 WS at 84 MHz per RM0368 §3.5.1
     unsafe {
-        let flash = &*embassy_stm32::pac::FLASH::ptr();
-        flash.acr().modify(|w| {
-            w.set_latency(5);
-            w.set_prften(true);
-            w.set_icen(true);
-            w.set_dcen(true);
-        });
+        let flash_acr = 0x4002_3C00 as *mut u32;
+        let val = (5 << 0) | (1 << 8) | (1 << 9) | (1 << 10);
+        core::ptr::write_volatile(flash_acr, val);
     }
 
     #[cfg(feature = "analog")]
     {
         info!("=== ANALOG MODE ===");
+        let uart_transport = transport::Transport::new(
+            peripherals.USART2,
+            peripherals.PA2,
+            peripherals.PA3,
+            peripherals.DMA1_CH6,
+            peripherals.DMA1_CH5,
+        );
         spawner.spawn(analog::adc_task(
             peripherals.ADC1,
             peripherals.DMA2_CH0,
             peripherals.PA0,
             peripherals.PA1,
+            uart_transport,
         ).unwrap())
     }
 
@@ -98,15 +100,9 @@ async fn main(spawner: Spawner) {
     #[cfg(feature = "fault")]
     {
         info!("=== FAULT INJECTION MODE ===");
-        let uart = fault::UartBitbang::new(peripherals.PA2, peripherals.PA3);
+        let uart = fault::UartBitbang::new(peripherals.PB6, peripherals.PB7);
         let engine = fault::FaultEngine::new();
         spawner.spawn(fault::fault_task_entry(uart, engine).unwrap());
-    }
-
-    #[cfg(feature = "telemetry")]
-    {
-        info!("=== TELEMETRY MODE ===");
-        spawner.spawn(telemetry::telemetry_task()).unwrap();
     }
 
     #[cfg(not(any(feature = "analog", feature = "digital")))]
