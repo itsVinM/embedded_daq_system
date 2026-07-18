@@ -1,135 +1,120 @@
-use defmt::info;
-use shared::{FaultType, FaultConfig};
-use super::{bit_flip, bit_set, bit_clear, busy_delay, Lfsr};
+use shared::{FaultConfig, FaultType, FaultResult, FaultInjector};
+use super::{bit_flip, bit_set, bit_clear, busy_delay_us, Lfsr, should_inject};
 
-pub struct OneWireFaultInjector {
-    config: FaultConfig,
-    lfsr: Lfsr,
-    injected_count: u32,
+pub struct OneWireBus {
+    pub line: bool,
 }
 
-impl OneWireFaultInjector {
-    pub fn new(config: FaultConfig) -> Self {
+pub struct OneWireFaultInjector<'d> {
+    config: FaultConfig,
+    lfsr: Lfsr,
+    armed: bool,
+    count: u32,
+    _lifetime: core::marker::PhantomData<&'d ()>,
+}
+
+impl<'d> OneWireFaultInjector<'d> {
+    pub fn new() -> Self {
         Self {
-            config,
+            config: FaultConfig::new(shared::Protocol::OneWire, FaultType::BitFlip),
             lfsr: Lfsr::new(0x5678),
-            injected_count: 0,
+            armed: false,
+            count: 0,
+            _lifetime: core::marker::PhantomData,
         }
     }
 
-    pub fn inject_presence(&self) -> bool {
-        if !self.should_inject() {
-            return false;
-        }
-        if self.config.fault_type == FaultType::Timeout {
-            busy_delay(self.config.duration_us * 21);
-            info!("onewire: presence pulse suppressed ({} us)", self.config.duration_us);
-            return true;
-        }
-        false
+    pub fn suppress_presence(&self) -> bool {
+        self.armed && self.config.fault_type == FaultType::Timeout
+            && should_inject(&mut Lfsr::new(0), self.config.probability_permille)
     }
 
     pub fn inject_data(&mut self, byte: u8, index: usize) -> u8 {
-        if !self.should_inject() {
+        if !self.armed || !should_inject(&mut self.lfsr, self.config.probability_permille) {
             return byte;
         }
-
+        let bit = if self.config.target_bit < 8 {
+            self.config.target_bit
+        } else {
+            self.lfsr.next_bit()
+        };
         let result = match self.config.fault_type {
-            FaultType::BitFlip => {
-                let bit = if self.config.target_bit < 8 {
-                    self.config.target_bit
-                } else {
-                    self.lfsr.next_bit()
-                };
-                bit_flip(byte, bit)
-            }
-            FaultType::StuckAtZero => {
-                let bit = if self.config.target_bit < 8 {
-                    self.config.target_bit
-                } else {
-                    self.lfsr.next_bit()
-                };
-                bit_clear(byte, bit)
-            }
-            FaultType::StuckAtOne => {
-                let bit = if self.config.target_bit < 8 {
-                    self.config.target_bit
-                } else {
-                    self.lfsr.next_bit()
-                };
-                bit_set(byte, bit)
-            }
-            FaultType::CrcCorrupt => {
-                if index >= 8 {
-                    let bit = self.lfsr.next_bit();
-                    bit_flip(byte, bit)
-                } else {
-                    byte
-                }
-            }
+            FaultType::BitFlip => bit_flip(byte, bit),
+            FaultType::StuckAtZero => bit_clear(byte, bit),
+            FaultType::StuckAtOne => bit_set(byte, bit),
+            FaultType::CrcCorrupt if index >= 8 => bit_flip(byte, self.lfsr.next_bit()),
             _ => byte,
         };
-
-        self.injected_count += 1;
-        info!("onewire: fault data[{}] 0x{:02X} → 0x{:02X}", index, byte, result);
+        if result != byte { self.count += 1; }
         result
-    }
-
-    pub fn inject_timing(&self) {
-        if self.config.fault_type == FaultType::BitDelay && self.should_inject() {
-            busy_delay(self.config.duration_us * 21);
-            info!("onewire: timing violation ({} us)", self.config.duration_us);
-        }
-    }
-
-    pub fn inject_reset_pulse(&self) -> bool {
-        if !self.should_inject() {
-            return false;
-        }
-        if self.config.fault_type == FaultType::ClockGlitch {
-            busy_delay(100);
-            info!("onewire: reset pulse glitch");
-            return true;
-        }
-        false
     }
 
     pub fn inject_rom_command(&mut self, cmd: u8) -> u8 {
-        if !self.should_inject() {
+        if !self.armed || !should_inject(&mut self.lfsr, self.config.probability_permille) {
             return cmd;
         }
-
-        let result = match self.config.fault_type {
+        match self.config.fault_type {
             FaultType::BitFlip => {
                 let bit = if self.config.target_bit < 8 {
                     self.config.target_bit
                 } else {
                     self.lfsr.next_bit()
                 };
-                bit_flip(cmd, bit)
+                let r = bit_flip(cmd, bit);
+                if r != cmd { self.count += 1; }
+                r
             }
             _ => cmd,
-        };
-
-        self.injected_count += 1;
-        info!("onewire: ROM cmd 0x{:02X} → 0x{:02X}", cmd, result);
-        result
-    }
-
-    fn should_inject(&self) -> bool {
-        if self.config.probability_permille == 0 {
-            return false;
         }
-        if self.config.probability_permille >= 1000 {
-            return true;
-        }
-        let r = self.lfsr.next() & 0x03FF;
-        (r as u16) < self.config.probability_permille
     }
 
-    pub fn injected_count(&self) -> u32 {
-        self.injected_count
+    pub fn inject_timing_violation(&self) {
+        if self.armed && self.config.fault_type == FaultType::BitDelay
+            && should_inject(&mut Lfsr::new(0), self.config.probability_permille)
+        {
+            busy_delay_us(self.config.duration_us);
+        }
     }
+
+    pub fn glitch_reset_pulse(&self) -> bool {
+        self.armed && self.config.fault_type == FaultType::ClockGlitch
+            && should_inject(&mut Lfsr::new(0), self.config.probability_permille)
+    }
+}
+
+impl<'d, 'b> FaultInjector<'d, OneWireBus> for OneWireFaultInjector<'d> {
+    type Error = ();
+
+    fn configure(&mut self, config: &FaultConfig) -> Result<(), ()> {
+        self.config = *config;
+        Ok(())
+    }
+
+    fn arm(&mut self) -> Result<(), ()> {
+        self.armed = true;
+        self.count = 0;
+        Ok(())
+    }
+
+    fn disarm(&mut self) -> Result<(), ()> {
+        self.armed = false;
+        Ok(())
+    }
+
+    fn fire(&mut self, bus: &mut OneWireBus) -> Result<FaultResult, ()> {
+        if !self.armed { return Err(()); }
+        if self.config.fault_type == FaultType::Timeout && self.suppress_presence() {
+            busy_delay_us(self.config.duration_us);
+        }
+        if self.config.fault_type == FaultType::ClockGlitch {
+            self.glitch_reset_pulse();
+        }
+        Ok(FaultResult::Fired)
+    }
+
+    fn is_armed(&self) -> bool { self.armed }
+    fn injected_count(&self) -> u32 { self.count }
+    fn reset_stats(&mut self) { self.count = 0; }
 }
 
 #[cfg(test)]
@@ -139,40 +124,47 @@ mod tests {
     #[test]
     fn onewire_bit_flip() {
         let cfg = FaultConfig::new(shared::Protocol::OneWire, FaultType::BitFlip).at_bit(0);
-        let mut inj = OneWireFaultInjector::new(cfg);
-        let result = inj.inject_data(0b1111_1110, 0);
-        assert_eq!(result, 0b1111_1111);
+        let mut inj = OneWireFaultInjector::new();
+        inj.configure(&cfg).unwrap();
+        inj.arm().unwrap();
+        assert_eq!(inj.inject_data(0b1111_1110, 0), 0b1111_1111);
     }
 
     #[test]
-    fn onewire_crc_corrupt_only_after_index8() {
+    fn onewire_crc_corrupt_after_index8() {
         let cfg = FaultConfig::new(shared::Protocol::OneWire, FaultType::CrcCorrupt);
-        let mut inj = OneWireFaultInjector::new(cfg);
-        let d0 = inj.inject_data(0xFF, 0);
-        let d10 = inj.inject_data(0xFF, 10);
-        assert_eq!(d0, 0xFF);
-        assert_ne!(d10, 0xFF);
+        let mut inj = OneWireFaultInjector::new();
+        inj.configure(&cfg).unwrap();
+        inj.arm().unwrap();
+        assert_eq!(inj.inject_data(0xFF, 0), 0xFF);
+        assert_ne!(inj.inject_data(0xFF, 10), 0xFF);
     }
 
     #[test]
     fn onewire_presence_suppressed() {
         let cfg = FaultConfig::new(shared::Protocol::OneWire, FaultType::Timeout);
-        let inj = OneWireFaultInjector::new(cfg);
-        assert!(inj.inject_presence());
+        let mut inj = OneWireFaultInjector::new();
+        inj.configure(&cfg).unwrap();
+        inj.arm().unwrap();
+        assert!(inj.suppress_presence());
     }
 
     #[test]
-    fn onewire_reset_glitch() {
-        let cfg = FaultConfig::new(shared::Protocol::OneWire, FaultType::ClockGlitch);
-        let mut inj = OneWireFaultInjector::new(cfg);
-        assert!(inj.inject_reset_pulse());
-    }
-
-    #[test]
-    fn onewire_rom_command_flip() {
+    fn onewire_rom_cmd_flip() {
         let cfg = FaultConfig::new(shared::Protocol::OneWire, FaultType::BitFlip).at_bit(0);
-        let mut inj = OneWireFaultInjector::new(cfg);
-        let result = inj.inject_rom_command(0xCC);
-        assert_eq!(result, 0xCD);
+        let mut inj = OneWireFaultInjector::new();
+        inj.configure(&cfg).unwrap();
+        inj.arm().unwrap();
+        assert_eq!(inj.inject_rom_command(0xCC), 0xCD);
+    }
+
+    #[test]
+    fn onewire_trait_fire() {
+        let cfg = FaultConfig::new(shared::Protocol::OneWire, FaultType::BitFlip);
+        let mut inj = OneWireFaultInjector::new();
+        inj.configure(&cfg).unwrap();
+        inj.arm().unwrap();
+        let mut bus = OneWireBus { line: true };
+        assert_eq!(inj.fire(&mut bus).unwrap(), FaultResult::Fired);
     }
 }

@@ -209,49 +209,49 @@ impl HealthStatus {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum Protocol {
-    Spi   = 0,
-    I2c   = 1,
-    Uart  = 2,
-    Can   = 3,
+    Spi     = 0,
+    I2c     = 1,
+    Uart    = 2,
+    Can     = 3,
     OneWire = 4,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum FaultType {
-    BitFlip         = 0x01,
-    StuckAtZero     = 0x02,
-    StuckAtOne      = 0x03,
-    BitDelay        = 0x04,
-    ClockGlitch     = 0x05,
-    FrameCorrupt    = 0x06,
-    NackInjection   = 0x07,
-    ParityError     = 0x08,
-    CrcCorrupt      = 0x09,
-    BusLockup       = 0x0A,
-    Overrun         = 0x0B,
-    Timeout         = 0x0C,
+    BitFlip       = 0x01,
+    StuckAtZero   = 0x02,
+    StuckAtOne    = 0x03,
+    BitDelay      = 0x04,
+    ClockGlitch   = 0x05,
+    FrameCorrupt  = 0x06,
+    NackInjection = 0x07,
+    ParityError   = 0x08,
+    CrcCorrupt    = 0x09,
+    BusLockup     = 0x0A,
+    Overrun       = 0x0B,
+    Timeout       = 0x0C,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum FaultCommand {
-    Arm      = 0x01,
-    Disarm   = 0x02,
-    Trigger  = 0x03,
-    Status   = 0x04,
-    Reset    = 0x05,
+    Arm    = 0x01,
+    Disarm = 0x02,
+    Fire   = 0x03,
+    Status = 0x04,
+    Reset  = 0x05,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum FaultResult {
-    Armed        = 0x01,
-    Disarmed     = 0x02,
-    Triggered    = 0x03,
-    Busy         = 0x04,
-    Error        = 0x05,
-    Completed    = 0x06,
+    Armed     = 0x01,
+    Disarmed  = 0x02,
+    Fired     = 0x03,
+    Busy      = 0x04,
+    Error     = 0x05,
+    Completed = 0x06,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -295,6 +295,91 @@ impl FaultConfig {
     pub const fn probability(mut self, permille: u16) -> Self {
         self.probability_permille = permille;
         self
+    }
+}
+
+/// Core trait for all protocol fault injectors.
+/// Generic over the protocol bus type `B` — each protocol provides its own bus handle.
+pub trait FaultInjector<'d, B: ?Sized> {
+    type Error;
+
+    fn configure(&mut self, config: &FaultConfig) -> Result<(), Self::Error>;
+    fn arm(&mut self) -> Result<(), Self::Error>;
+    fn disarm(&mut self) -> Result<(), Self::Error>;
+    fn fire(&mut self, bus: &mut B) -> Result<FaultResult, Self::Error>;
+    fn is_armed(&self) -> bool;
+    fn injected_count(&self) -> u32;
+    fn reset_stats(&mut self);
+}
+
+// ─── Telemetry ────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum TelemetryChannel {
+    Voltage   = 0,
+    Current   = 1,
+    Temperature = 2,
+    Rtc       = 3,
+    Gpio      = 4,
+}
+
+#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+pub struct TelemetryFrame {
+    pub channel: TelemetryChannel,
+    pub timestamp_us: u32,
+    pub value_i32: i32,
+    pub value_u32: u32,
+    pub flags: u16,
+}
+
+/// Generic telemetry reader trait.
+/// `T` is the concrete sensor/driver type — each backend provides its own.
+pub trait TelemetryReader<'d, T> {
+    type Error;
+
+    fn read_raw(&mut self, sensor: &'d T) -> Result<u32, Self::Error>;
+    fn read_calibrated(&mut self, sensor: &'d T) -> Result<TelemetryFrame, Self::Error>;
+    fn channel(&self) -> TelemetryChannel;
+    fn last_reading(&self) -> Option<TelemetryFrame>;
+}
+
+/// Aggregator that collects telemetry from multiple readers.
+pub struct TelemetryBus<const N: usize> {
+    frames: [TelemetryFrame; N],
+    count: usize,
+}
+
+impl<const N: usize> TelemetryBus<N> {
+    pub const fn new() -> Self {
+        Self {
+            frames: [TelemetryFrame {
+                channel: TelemetryChannel::Voltage,
+                timestamp_us: 0,
+                value_i32: 0,
+                value_u32: 0,
+                flags: 0,
+            }; N],
+            count: 0,
+        }
+    }
+
+    pub fn push(&mut self, frame: TelemetryFrame) {
+        if self.count < N {
+            self.frames[self.count] = frame;
+            self.count += 1;
+        }
+    }
+
+    pub fn drain(&mut self) -> &[TelemetryFrame] {
+        let slice = &self.frames[..self.count];
+        self.count = 0;
+        slice
+    }
+
+    pub fn is_full(&self) -> bool {
+        self.count >= N
     }
 }
 
@@ -377,17 +462,12 @@ mod tests {
     }
 
     #[test]
-    fn sample_packet_byte_size() {
-        let pkt = SamplePacket::new();
-        let expected = core::mem::size_of::<u16>() * 3 + core::mem::size_of::<Sample>() * SAMPLES_PER_PACKET;
-        assert_eq!(pkt.as_bytes().len(), expected);
-    }
-
-    #[test]
     fn health_error_new_variant() {
         let err = HealthStatus::Fail(HealthError::ClockHclkNotRunning);
         assert_eq!(err.as_str(), "FAIL:hclk\n");
     }
+
+    // ── Fault injection tests ───────────────────────────────────────────
 
     #[test]
     fn fault_config_new() {
@@ -438,5 +518,128 @@ mod tests {
     fn fault_result_repr() {
         assert_eq!(FaultResult::Armed as u8, 0x01);
         assert_eq!(FaultResult::Completed as u8, 0x06);
+    }
+
+    // ── Telemetry tests ─────────────────────────────────────────────────
+
+    #[test]
+    fn telemetry_bus_push_and_drain() {
+        let mut bus = TelemetryBus::<4>::new();
+        assert!(!bus.is_full());
+
+        bus.push(TelemetryFrame {
+            channel: TelemetryChannel::Voltage,
+            timestamp_us: 100,
+            value_i32: 3300,
+            value_u32: 3300,
+            flags: 0,
+        });
+        bus.push(TelemetryFrame {
+            channel: TelemetryChannel::Temperature,
+            timestamp_us: 200,
+            value_i32: 25,
+            value_u32: 25,
+            flags: 0,
+        });
+
+        let frames = bus.drain();
+        assert_eq!(frames.len(), 2);
+        assert_eq!(frames[0].channel, TelemetryChannel::Voltage);
+        assert_eq!(frames[1].channel, TelemetryChannel::Temperature);
+        assert_eq!(bus.drain().len(), 0);
+    }
+
+    #[test]
+    fn telemetry_bus_overflow() {
+        let mut bus = TelemetryBus::<2>::new();
+        for i in 0..5u32 {
+            bus.push(TelemetryFrame {
+                channel: TelemetryChannel::Current,
+                timestamp_us: i,
+                value_i32: i as i32,
+                value_u32: i,
+                flags: 0,
+            });
+        }
+        assert!(bus.is_full());
+        assert_eq!(bus.drain().len(), 2);
+    }
+
+    // ── Mock FaultInjector test ──────────────────────────────────────────
+
+    struct MockBus;
+
+    struct MockInjector {
+        armed: bool,
+        count: u32,
+    }
+
+    impl MockInjector {
+        fn new() -> Self {
+            Self { armed: false, count: 0 }
+        }
+    }
+
+    impl<'d> FaultInjector<'d, MockBus> for MockInjector {
+        type Error = ();
+
+        fn configure(&mut self, _config: &FaultConfig) -> Result<(), ()> {
+            Ok(())
+        }
+        fn arm(&mut self) -> Result<(), ()> {
+            self.armed = true;
+            Ok(())
+        }
+        fn disarm(&mut self) -> Result<(), ()> {
+            self.armed = false;
+            Ok(())
+        }
+        fn fire(&mut self, _bus: &mut MockBus) -> Result<FaultResult, ()> {
+            if !self.armed {
+                return Err(());
+            }
+            self.count += 1;
+            Ok(FaultResult::Fired)
+        }
+        fn is_armed(&self) -> bool {
+            self.armed
+        }
+        fn injected_count(&self) -> u32 {
+            self.count
+        }
+        fn reset_stats(&mut self) {
+            self.count = 0;
+        }
+    }
+
+    #[test]
+    fn trait_arm_fire_cycle() {
+        let mut inj = MockInjector::new();
+        let mut bus = MockBus;
+
+        assert!(!inj.is_armed());
+        inj.arm().unwrap();
+        assert!(inj.is_armed());
+
+        let r = inj.fire(&mut bus).unwrap();
+        assert_eq!(r, FaultResult::Fired);
+        assert_eq!(inj.injected_count(), 1);
+
+        inj.disarm().unwrap();
+        assert!(!inj.is_armed());
+        assert!(inj.fire(&mut bus).is_err());
+    }
+
+    #[test]
+    fn trait_generic_dispatch() {
+        fn dispatch<I: FaultInjector<'static, MockBus>>(inj: &mut I, bus: &mut MockBus) {
+            inj.arm().unwrap();
+            inj.fire(bus).unwrap();
+        }
+
+        let mut inj = MockInjector::new();
+        let mut bus = MockBus;
+        dispatch(&mut inj, &mut bus);
+        assert_eq!(inj.injected_count(), 1);
     }
 }

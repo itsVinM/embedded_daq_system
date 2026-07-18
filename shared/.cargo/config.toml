@@ -1,0 +1,3 @@
+[build]
+# Override workspace default so tests compile for host (not thumbv7em)
+target = "aarch64-apple-darwin"

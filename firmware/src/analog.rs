@@ -4,10 +4,10 @@ use embassy_stm32::{
     bind_interrupts, dma, peripherals,
     Peri,
 };
-use embassy_time::Timer;
-use shared::{SamplePacket, AcquisitionConfig, ChannelId, AdcCalibration, ChannelId};
 
-use transport::{Transport};
+use shared::{SamplePacket, AdcCalibration};
+
+use crate::transport::Transport;
 
 bind_interrupts!(struct Irqs {
     DMA2_STREAM0 => dma::InterruptHandler<peripherals::DMA2_CH0>;

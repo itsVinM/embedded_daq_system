@@ -11,13 +11,17 @@ use embassy_stm32::Peri;
 use embassy_stm32::peripherals::RCC;
 use embassy_stm32::Config;
 use panic_probe as _;
-use shared::{HealthStatus, AcquisitionConfig};
+use shared::HealthStatus;
 
 mod health;
 mod mpu;
 mod analog;
 mod digital;
 mod transport;
+#[cfg(feature = "fault")]
+mod fault;
+#[cfg(feature = "telemetry")]
+mod telemetry;
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
@@ -90,7 +94,21 @@ async fn main(spawner: Spawner) {
     {
         info!("!!! Both analog and digital enabled - running BOTH !!!");
     }
- 
+
+    #[cfg(feature = "fault")]
+    {
+        info!("=== FAULT INJECTION MODE ===");
+        let uart = fault::UartBitbang::new(peripherals.PA2, peripherals.PA3);
+        let engine = fault::FaultEngine::new();
+        spawner.spawn(fault::fault_task_entry(uart, engine).unwrap());
+    }
+
+    #[cfg(feature = "telemetry")]
+    {
+        info!("=== TELEMETRY MODE ===");
+        spawner.spawn(telemetry::telemetry_task()).unwrap();
+    }
+
     #[cfg(not(any(feature = "analog", feature = "digital")))]
     {
         info!("WARNING: No features enabled. Enable 'analog' or 'digital' in Cargo.toml");

@@ -1,138 +1,113 @@
-use defmt::info;
-use shared::{FaultType, FaultConfig};
-use super::{bit_flip, bit_set, bit_clear, busy_delay, Lfsr};
+use shared::{FaultConfig, FaultType, FaultResult, FaultInjector};
+use super::{bit_flip, bit_set, bit_clear, busy_delay_us, Lfsr, should_inject};
 
-pub struct CanFaultInjector {
-    config: FaultConfig,
-    lfsr: Lfsr,
-    injected_count: u32,
+pub struct CanBus {
+    pub id: u32,
+    pub data: [u8; 8],
+    pub dlc: u8,
 }
 
-impl CanFaultInjector {
-    pub fn new(config: FaultConfig) -> Self {
+pub struct CanFaultInjector<'d> {
+    config: FaultConfig,
+    lfsr: Lfsr,
+    armed: bool,
+    count: u32,
+    _lifetime: core::marker::PhantomData<&'d ()>,
+}
+
+impl<'d> CanFaultInjector<'d> {
+    pub fn new() -> Self {
         Self {
-            config,
+            config: FaultConfig::new(shared::Protocol::Can, FaultType::BitFlip),
             lfsr: Lfsr::new(0x1234),
-            injected_count: 0,
+            armed: false,
+            count: 0,
+            _lifetime: core::marker::PhantomData,
         }
     }
 
     pub fn inject_id(&mut self, id: u32) -> u32 {
-        if !self.should_inject() {
+        if !self.armed || !should_inject(&mut self.lfsr, self.config.probability_permille) {
             return id;
         }
-
+        let bit = if self.config.target_bit < 29 {
+            self.config.target_bit
+        } else {
+            self.lfsr.next_bit() % 29
+        };
         let result = match self.config.fault_type {
-            FaultType::BitFlip => {
-                let bit = if self.config.target_bit < 29 {
-                    self.config.target_bit
-                } else {
-                    self.lfsr.next_bit() % 29
-                };
-                id ^ (1 << bit)
-            }
-            FaultType::StuckAtZero => {
-                let bit = if self.config.target_bit < 29 {
-                    self.config.target_bit
-                } else {
-                    self.lfsr.next_bit() % 29
-                };
-                id & !(1 << bit)
-            }
-            FaultType::StuckAtOne => {
-                let bit = if self.config.target_bit < 29 {
-                    self.config.target_bit
-                } else {
-                    self.lfsr.next_bit() % 29
-                };
-                id | (1 << bit)
-            }
+            FaultType::BitFlip => id ^ (1 << bit),
+            FaultType::StuckAtZero => id & !(1 << bit),
+            FaultType::StuckAtOne => id | (1 << bit),
             _ => id,
         };
-
-        self.injected_count += 1;
-        info!("can: fault ID 0x{:08X} → 0x{:08X}", id, result);
+        if result != id { self.count += 1; }
         result
     }
 
     pub fn inject_data(&mut self, byte: u8, index: usize) -> u8 {
-        if !self.should_inject() {
+        if !self.armed || !should_inject(&mut self.lfsr, self.config.probability_permille) {
             return byte;
         }
-
         let result = match self.config.fault_type {
             FaultType::BitFlip => {
-                let bit = if self.config.target_bit < 8 {
-                    self.config.target_bit
-                } else {
-                    self.lfsr.next_bit()
-                };
+                let bit = if self.config.target_bit < 8 { self.config.target_bit } else { self.lfsr.next_bit() };
                 bit_flip(byte, bit)
             }
-            FaultType::CrcCorrupt => {
-                if index >= 4 {
-                    let bit = self.lfsr.next_bit();
-                    bit_flip(byte, bit)
-                } else {
-                    byte
-                }
+            FaultType::CrcCorrupt if index >= 4 => {
+                bit_flip(byte, self.lfsr.next_bit())
             }
             FaultType::FrameCorrupt => {
-                let bit = self.lfsr.next_bit();
-                bit_flip(byte, bit)
+                bit_flip(byte, self.lfsr.next_bit())
             }
             _ => byte,
         };
-
-        self.injected_count += 1;
-        info!("can: fault data[{}] 0x{:02X} → 0x{:02X}", index, byte, result);
+        if result != byte { self.count += 1; }
         result
     }
 
-    pub fn inject_stuff_bit(&mut self) -> bool {
-        if !self.should_inject() {
-            return false;
-        }
-        if self.config.fault_type == FaultType::ClockGlitch {
-            self.injected_count += 1;
-            info!("can: stuff bit error injected");
-            return true;
-        }
-        false
-    }
-
-    pub fn inject_bit_timing(&self) {
-        if self.config.fault_type == FaultType::BitDelay && self.should_inject() {
-            busy_delay(self.config.duration_us * 21);
-            info!("can: bit timing offset ({} us)", self.config.duration_us);
-        }
+    pub fn inject_stuff_error(&self) -> bool {
+        self.armed && self.config.fault_type == FaultType::ClockGlitch
+            && should_inject(&mut Lfsr::new(0), self.config.probability_permille)
     }
 
     pub fn inject_form_error(&self) -> bool {
-        if !self.should_inject() {
-            return false;
-        }
-        if self.config.fault_type == FaultType::FrameCorrupt {
-            info!("can: form error injected");
-            return true;
-        }
-        false
+        self.armed && self.config.fault_type == FaultType::FrameCorrupt
+            && should_inject(&mut Lfsr::new(0), self.config.probability_permille)
+    }
+}
+
+impl<'d, 'b> FaultInjector<'d, CanBus> for CanFaultInjector<'d> {
+    type Error = ();
+
+    fn configure(&mut self, config: &FaultConfig) -> Result<(), ()> {
+        self.config = *config;
+        Ok(())
     }
 
-    fn should_inject(&self) -> bool {
-        if self.config.probability_permille == 0 {
-            return false;
-        }
-        if self.config.probability_permille >= 1000 {
-            return true;
-        }
-        let r = self.lfsr.next() & 0x03FF;
-        (r as u16) < self.config.probability_permille
+    fn arm(&mut self) -> Result<(), ()> {
+        self.armed = true;
+        self.count = 0;
+        Ok(())
     }
 
-    pub fn injected_count(&self) -> u32 {
-        self.injected_count
+    fn disarm(&mut self) -> Result<(), ()> {
+        self.armed = false;
+        Ok(())
     }
+
+    fn fire(&mut self, bus: &mut CanBus) -> Result<FaultResult, ()> {
+        if !self.armed { return Err(()); }
+        bus.id = self.inject_id(bus.id);
+        for (i, byte) in bus.data.iter_mut().enumerate() {
+            *byte = self.inject_data(*byte, i);
+        }
+        Ok(FaultResult::Fired)
+    }
+
+    fn is_armed(&self) -> bool { self.armed }
+    fn injected_count(&self) -> u32 { self.count }
+    fn reset_stats(&mut self) { self.count = 0; }
 }
 
 #[cfg(test)]
@@ -142,23 +117,27 @@ mod tests {
     #[test]
     fn can_bit_flip_id() {
         let cfg = FaultConfig::new(shared::Protocol::Can, FaultType::BitFlip).at_bit(0);
-        let mut inj = CanFaultInjector::new(cfg);
-        let result = inj.inject_id(0x0000_0000);
-        assert_eq!(result, 0x0000_0001);
+        let mut inj = CanFaultInjector::new();
+        inj.configure(&cfg).unwrap();
+        inj.arm().unwrap();
+        assert_eq!(inj.inject_id(0x0000_0000), 0x0000_0001);
     }
 
     #[test]
-    fn can_stuck_at_zero_id() {
+    fn can_stuck_at_zero() {
         let cfg = FaultConfig::new(shared::Protocol::Can, FaultType::StuckAtZero).at_bit(3);
-        let mut inj = CanFaultInjector::new(cfg);
-        let result = inj.inject_id(0xFFFF_FFFF);
-        assert_eq!(result, 0xFFFF_FFF7);
+        let mut inj = CanFaultInjector::new();
+        inj.configure(&cfg).unwrap();
+        inj.arm().unwrap();
+        assert_eq!(inj.inject_id(0xFFFF_FFFF), 0xFFFF_FFF7);
     }
 
     #[test]
     fn can_crc_corrupt() {
         let cfg = FaultConfig::new(shared::Protocol::Can, FaultType::CrcCorrupt);
-        let mut inj = CanFaultInjector::new(cfg);
+        let mut inj = CanFaultInjector::new();
+        inj.configure(&cfg).unwrap();
+        inj.arm().unwrap();
         let d0 = inj.inject_data(0xFF, 0);
         let d4 = inj.inject_data(0xFF, 4);
         assert_eq!(d0, 0xFF);
@@ -166,16 +145,13 @@ mod tests {
     }
 
     #[test]
-    fn can_form_error() {
-        let cfg = FaultConfig::new(shared::Protocol::Can, FaultType::FrameCorrupt);
-        let inj = CanFaultInjector::new(cfg);
-        assert!(inj.inject_form_error());
-    }
-
-    #[test]
-    fn can_stuff_bit_error() {
-        let cfg = FaultConfig::new(shared::Protocol::Can, FaultType::ClockGlitch);
-        let mut inj = CanFaultInjector::new(cfg);
-        assert!(inj.inject_stuff_bit());
+    fn can_trait_fire() {
+        let cfg = FaultConfig::new(shared::Protocol::Can, FaultType::BitFlip).at_bit(0);
+        let mut inj = CanFaultInjector::new();
+        inj.configure(&cfg).unwrap();
+        inj.arm().unwrap();
+        let mut bus = CanBus { id: 0, data: [0; 8], dlc: 8 };
+        assert_eq!(inj.fire(&mut bus).unwrap(), FaultResult::Fired);
+        assert_eq!(bus.id, 0x0000_0001);
     }
 }

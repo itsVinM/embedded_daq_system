@@ -42,3 +42,5 @@ debug = 2
 default = ["analog"]
 analog = []
 digital = []
+fault = []
+telemetry = []

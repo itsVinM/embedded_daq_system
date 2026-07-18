@@ -1,140 +1,117 @@
-use defmt::info;
-use shared::{FaultType, FaultConfig};
-use super::{bit_flip, bit_set, bit_clear, busy_delay, Lfsr};
+use shared::{FaultConfig, FaultType, FaultResult, FaultInjector};
+use super::{bit_flip, bit_set, bit_clear, busy_delay_us, Lfsr, should_inject};
 
-pub struct I2cFaultInjector {
-    config: FaultConfig,
-    lfsr: Lfsr,
-    injected_count: u32,
+pub struct I2cBus {
+    pub sda: bool,
+    pub scl: bool,
 }
 
-impl I2cFaultInjector {
-    pub fn new(config: FaultConfig) -> Self {
+pub struct I2cFaultInjector<'d> {
+    config: FaultConfig,
+    lfsr: Lfsr,
+    armed: bool,
+    count: u32,
+    _lifetime: core::marker::PhantomData<&'d ()>,
+}
+
+impl<'d> I2cFaultInjector<'d> {
+    pub fn new() -> Self {
         Self {
-            config,
+            config: FaultConfig::new(shared::Protocol::I2c, FaultType::NackInjection),
             lfsr: Lfsr::new(0xCAFE),
-            injected_count: 0,
+            armed: false,
+            count: 0,
+            _lifetime: core::marker::PhantomData,
         }
     }
 
-    pub fn inject_address(&mut self, addr: u8, read: bool) -> (u8, bool) {
-        if !self.should_inject() {
-            return (addr, read);
+    pub fn inject_address(&mut self, addr: u8) -> u8 {
+        if !self.armed || !should_inject(&mut self.lfsr, self.config.probability_permille) {
+            return addr;
         }
-
-        let result_addr = match self.config.fault_type {
-            FaultType::BitFlip => {
-                let bit = if self.config.target_bit < 7 {
-                    self.config.target_bit
-                } else {
-                    self.lfsr.next_bit() % 7
-                };
-                bit_flip(addr, bit)
-            }
-            FaultType::StuckAtZero => {
-                let bit = if self.config.target_bit < 7 {
-                    self.config.target_bit
-                } else {
-                    self.lfsr.next_bit() % 7
-                };
-                bit_clear(addr, bit)
-            }
-            FaultType::StuckAtOne => {
-                let bit = if self.config.target_bit < 7 {
-                    self.config.target_bit
-                } else {
-                    self.lfsr.next_bit() % 7
-                };
-                bit_set(addr, bit)
-            }
+        let bit = if self.config.target_bit < 7 {
+            self.config.target_bit
+        } else {
+            self.lfsr.next_bit() % 7
+        };
+        let result = match self.config.fault_type {
+            FaultType::BitFlip => bit_flip(addr, bit),
+            FaultType::StuckAtZero => bit_clear(addr, bit),
+            FaultType::StuckAtOne => bit_set(addr, bit),
             _ => addr,
         };
-
-        self.injected_count += 1;
-        info!("i2c: fault addr 0x{:02X} → 0x{:02X}", addr, result_addr);
-        (result_addr, read)
+        if result != addr { self.count += 1; }
+        result
     }
 
     pub fn inject_data(&mut self, byte: u8) -> u8 {
-        if !self.should_inject() {
+        if !self.armed || !should_inject(&mut self.lfsr, self.config.probability_permille) {
             return byte;
         }
-
+        let bit = if self.config.target_bit < 8 {
+            self.config.target_bit
+        } else {
+            self.lfsr.next_bit()
+        };
         let result = match self.config.fault_type {
-            FaultType::BitFlip => {
-                let bit = if self.config.target_bit < 8 {
-                    self.config.target_bit
-                } else {
-                    self.lfsr.next_bit()
-                };
-                bit_flip(byte, bit)
-            }
-            FaultType::StuckAtZero => {
-                let bit = if self.config.target_bit < 8 {
-                    self.config.target_bit
-                } else {
-                    self.lfsr.next_bit()
-                };
-                bit_clear(byte, bit)
-            }
-            FaultType::StuckAtOne => {
-                let bit = if self.config.target_bit < 8 {
-                    self.config.target_bit
-                } else {
-                    self.lfsr.next_bit()
-                };
-                bit_set(byte, bit)
-            }
+            FaultType::BitFlip => bit_flip(byte, bit),
+            FaultType::StuckAtZero => bit_clear(byte, bit),
+            FaultType::StuckAtOne => bit_set(byte, bit),
             _ => byte,
         };
-
-        self.injected_count += 1;
-        info!("i2c: fault data 0x{:02X} → 0x{:02X}", byte, result);
+        if result != byte { self.count += 1; }
         result
     }
 
     pub fn should_nack(&self) -> bool {
-        if !self.should_inject() {
-            return false;
-        }
-        self.config.fault_type == FaultType::NackInjection
+        self.armed && self.config.fault_type == FaultType::NackInjection
+            && should_inject(&mut Lfsr::new(0), self.config.probability_permille)
     }
 
     pub fn should_lock_bus(&self) -> bool {
-        if !self.should_inject() {
-            return false;
-        }
-        self.config.fault_type == FaultType::BusLockup
+        self.armed && self.config.fault_type == FaultType::BusLockup
     }
 
-    pub fn inject_scl_hold(&self) {
-        if self.config.fault_type == FaultType::BusLockup && self.should_inject() {
-            busy_delay(self.config.duration_us * 21);
-            info!("i2c: SCL held low (bus lockup, {} us)", self.config.duration_us);
+    pub fn inject_bus_lockup(&self) {
+        if self.should_lock_bus() {
+            busy_delay_us(self.config.duration_us);
         }
+    }
+}
+
+impl<'d, 'b> FaultInjector<'d, I2cBus> for I2cFaultInjector<'d> {
+    type Error = ();
+
+    fn configure(&mut self, config: &FaultConfig) -> Result<(), ()> {
+        self.config = *config;
+        Ok(())
     }
 
-    pub fn inject_sda_delay(&self) {
-        if self.config.fault_type == FaultType::BitDelay && self.should_inject() {
-            busy_delay(self.config.duration_us * 21);
-            info!("i2c: SDA delay ({} us)", self.config.duration_us);
-        }
+    fn arm(&mut self) -> Result<(), ()> {
+        self.armed = true;
+        self.count = 0;
+        Ok(())
     }
 
-    fn should_inject(&self) -> bool {
-        if self.config.probability_permille == 0 {
-            return false;
-        }
-        if self.config.probability_permille >= 1000 {
-            return true;
-        }
-        let r = self.lfsr.next() & 0x03FF;
-        (r as u16) < self.config.probability_permille
+    fn disarm(&mut self) -> Result<(), ()> {
+        self.armed = false;
+        Ok(())
     }
 
-    pub fn injected_count(&self) -> u32 {
-        self.injected_count
+    fn fire(&mut self, bus: &mut I2cBus) -> Result<FaultResult, ()> {
+        if !self.armed { return Err(()); }
+        if self.config.fault_type == FaultType::BusLockup {
+            self.inject_bus_lockup();
+        }
+        if self.config.fault_type == FaultType::NackInjection {
+            self.count += 1;
+        }
+        Ok(FaultResult::Fired)
     }
+
+    fn is_armed(&self) -> bool { self.armed }
+    fn injected_count(&self) -> u32 { self.count }
+    fn reset_stats(&mut self) { self.count = 0; }
 }
 
 #[cfg(test)]
@@ -144,38 +121,46 @@ mod tests {
     #[test]
     fn i2c_bit_flip_address() {
         let cfg = FaultConfig::new(shared::Protocol::I2c, FaultType::BitFlip).at_bit(0);
-        let mut inj = I2cFaultInjector::new(cfg);
-        let (addr, _) = inj.inject_address(0x50, false);
-        assert_eq!(addr, 0x51);
+        let mut inj = I2cFaultInjector::new();
+        inj.configure(&cfg).unwrap();
+        inj.arm().unwrap();
+        assert_eq!(inj.inject_address(0x50), 0x51);
     }
 
     #[test]
-    fn i2c_nack_detection() {
-        let cfg = FaultConfig::new(shared::Protocol::I2c, FaultType::NackInjection);
-        let inj = I2cFaultInjector::new(cfg);
-        assert!(inj.should_nack());
+    fn i2c_stuck_at_zero_data() {
+        let cfg = FaultConfig::new(shared::Protocol::I2c, FaultType::StuckAtZero).at_bit(3);
+        let mut inj = I2cFaultInjector::new();
+        inj.configure(&cfg).unwrap();
+        inj.arm().unwrap();
+        assert_eq!(inj.inject_data(0xFF), 0xF7);
     }
 
     #[test]
-    fn i2c_bus_lockup() {
+    fn i2c_bus_lockup_detection() {
         let cfg = FaultConfig::new(shared::Protocol::I2c, FaultType::BusLockup);
-        let inj = I2cFaultInjector::new(cfg);
+        let mut inj = I2cFaultInjector::new();
+        inj.configure(&cfg).unwrap();
+        inj.arm().unwrap();
         assert!(inj.should_lock_bus());
     }
 
     #[test]
     fn i2c_no_nack_when_bitflip() {
         let cfg = FaultConfig::new(shared::Protocol::I2c, FaultType::BitFlip);
-        let inj = I2cFaultInjector::new(cfg);
-        assert!(!inj.should_nack());
+        let mut inj = I2cFaultInjector::new();
+        inj.configure(&cfg).unwrap();
+        inj.arm().unwrap();
         assert!(!inj.should_lock_bus());
     }
 
     #[test]
-    fn i2c_data_injection() {
-        let cfg = FaultConfig::new(shared::Protocol::I2c, FaultType::StuckAtZero).at_bit(3);
-        let mut inj = I2cFaultInjector::new(cfg);
-        let result = inj.inject_data(0xFF);
-        assert_eq!(result, 0xF7);
+    fn i2c_trait_fire() {
+        let cfg = FaultConfig::new(shared::Protocol::I2c, FaultType::NackInjection);
+        let mut inj = I2cFaultInjector::new();
+        inj.configure(&cfg).unwrap();
+        inj.arm().unwrap();
+        let mut bus = I2cBus { sda: true, scl: true };
+        assert_eq!(inj.fire(&mut bus).unwrap(), FaultResult::Fired);
     }
 }
